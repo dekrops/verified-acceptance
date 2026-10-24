@@ -19,3 +19,13 @@ What is **not** here:
 | `invoice-dedup` | [`dekrops/invoice-reconciliation`](https://github.com/dekrops/invoice-reconciliation), issue #1 | `challenges/invoice-dedup/` |
 
 `probe.py` is byte-identical to the one frozen in Verified's repository. `inputs.json` holds exactly the inputs of its frozen cases. The observer checks both by digest at the run's workflow commit.
+
+## GitHub tasks
+
+`task.yml` runs any GitHub task frozen in Verified's Playground, with no per-task file here. Verified starts the run (`workflow_dispatch`) with:
+- the task, the attempt, the repository and the commit SHA;
+- the task's **run bundle** (`verified-suite-run/1`, gzip and base64). It holds the container image (pinned by digest), the command, the probe and the test cases' inputs. It holds no expected result.
+
+The workflow refuses a malformed bundle, fetches the commit by SHA, and runs the probe in the same isolated container. It uploads the `answers` artifact with the bundle's digest (SHA-256 of its exact bytes). Verified's observer checks that digest against the task's frozen suite before comparing anything.
+
+`tooling/task.py` unpacks the bundle and assembles the answers. A run is dispatched with the ref `task-runner-1`, a tag at the reviewed commit the observer pins.

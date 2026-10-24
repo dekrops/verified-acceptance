@@ -1,0 +1,83 @@
+name: Task acceptance
+# The title names the task, the attempt and its commit, so a reader (and Verified's observer) can
+# find the run.
+run-name: task ${{ inputs.task }} ${{ inputs.attempt }} ${{ inputs.head }}
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: The task (its contract identifier)
+        required: true
+        type: string
+      attempt:
+        description: Attempt identifier (as Verified registered it)
+        required: true
+        type: string
+      repository:
+        description: The task's repository (owner/name)
+        required: true
+        type: string
+      head:
+        description: The submitted commit (40 hex digits)
+        required: true
+        type: string
+      bundle:
+        description: The suite's run bundle (verified-suite-run/1, gzip, base64), without expectations
+        required: true
+        type: string
+# Read-only, no secrets: the job holds nothing the submitted code could use.
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Inputs reach the steps as environment variables only, never as script text.
+    env:
+      TASK: ${{ inputs.task }}
+      ATTEMPT: ${{ inputs.attempt }}
+      REPOSITORY: ${{ inputs.repository }}
+      HEAD_SHA: ${{ inputs.head }}
+      BUNDLE: ${{ inputs.bundle }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check the inputs
+        run: |
+          [[ "$TASK" =~ ^[a-z][a-z0-9-]{0,44}$ ]] || { echo "bad task"; exit 1; }
+          [[ "$ATTEMPT" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { echo "bad attempt"; exit 1; }
+          [[ "$REPOSITORY" =~ ^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$ ]] || { echo "bad repository"; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "bad head"; exit 1; }
+      - name: Unpack the bundle
+        run: python3 tooling/task.py unpack "$RUNNER_TEMP/run"
+      - name: Fetch the submitted commit by SHA, never a branch
+        run: |
+          git init -q "$RUNNER_TEMP/submission"
+          git -C "$RUNNER_TEMP/submission" fetch -q --depth=1 "https://github.com/$REPOSITORY.git" "$HEAD_SHA"
+          test "$(git -C "$RUNNER_TEMP/submission" rev-parse FETCH_HEAD)" = "$HEAD_SHA"
+          echo "TREE=$(git -C "$RUNNER_TEMP/submission" rev-parse 'FETCH_HEAD^{tree}')" >> "$GITHUB_ENV"
+          mkdir "$RUNNER_TEMP/src"
+          git -C "$RUNNER_TEMP/submission" archive FETCH_HEAD | tar -x -C "$RUNNER_TEMP/src"
+      - name: Run the probe on the submission, isolated
+        run: |
+          image=$(cat "$RUNNER_TEMP/run/image")
+          probe=$(cat "$RUNNER_TEMP/run/probe-name")
+          mapfile -d '' -t command < "$RUNNER_TEMP/run/command"
+          docker pull -q "$image" > /dev/null
+          status=answered
+          timeout 120 docker run --rm -i --network none --read-only --tmpfs /tmp:size=64m \
+            --memory 512m --memory-swap 512m --cpus 1 --pids-limit 128 --cap-drop ALL \
+            --security-opt no-new-privileges --user 65534:65534 -e HOME=/tmp \
+            -v "$RUNNER_TEMP/src:/work/src:ro" -v "$RUNNER_TEMP/run/probe/$probe:/work/$probe:ro" \
+            -w /work "$image" "${command[@]}" < "$RUNNER_TEMP/run/inputs.json" \
+            > "$RUNNER_TEMP/probe.out" || { [ $? -eq 124 ] && status=timed-out; }
+          echo "STATUS=$status" >> "$GITHUB_ENV"
+      - name: Answers
+        run: python3 tooling/task.py answers "$RUNNER_TEMP/run" "$TASK" "$ATTEMPT" "$REPOSITORY" "$HEAD_SHA" "$TREE" "$STATUS" "$RUNNER_TEMP/probe.out"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: answers
+          path: answers.json
+          if-no-files-found: error
+          retention-days: 90
